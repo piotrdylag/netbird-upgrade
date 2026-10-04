@@ -1,0 +1,8 @@
+# Keep Unix line endings for everything that runs on Linux, even when the
+# repository is checked out on Windows.
+* text=auto eol=lf
+
+# Binary files: never touch line endings
+*.png binary
+*.jpg binary
+*.svg text eol=lf
