@@ -64,7 +64,7 @@ BACKUP_ROOT="/var/backups/netbird"
 
 - **Keep the quotes.** The file is read by Bash, where an unquoted `<` or `>` is a redirection.
 - To find your NetBird directory: `docker inspect -f '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}' $(docker ps -q --filter name=netbird | head -n1)`
-- `BACKUP_ROOT` is created if missing and forced to `root:root 0700`. It and all its parent directories must be owned by root and not group/world-writable. So `/home/<user>/backups` or a shared directory like `/var/backups` itself won't be accepted.
+- `BACKUP_ROOT` is created if missing and forced to `root:root 0700`. It and all its parent directories must be owned by root and not group/world-writable. So `/home/<user>/backups` or a shared directory like `/var/backups` itself won't be accepted. Temporary locations (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`) are refused too, because they're cleared on reboot or by automatic cleanup.
 
 The script refuses to run while a placeholder is left in place, a path isn't absolute, or `BACKUP_ROOT` isn't safe. Check that it can see your deployment:
 
@@ -133,6 +133,66 @@ Read the release notes before upgrading: [netbird](https://github.com/netbirdio/
 - `restore` only accepts archives inside the root-only `BACKUP_ROOT`, and isn't part of the operator's sudo rule. `BACKUP_ROOT` and every parent directory must be root-owned, so no other user can swap in their own archives.
 - Keep `NETBIRD_DIR` and its `docker-compose.yml` writable by root only. Anyone who can edit the compose file can get root through this script; it prints a warning if the directory is writable by another user.
 - Backups contain your database and encryption keys (`config.yaml`). Store copies off the server and protect them.
+
+## Tested on
+
+| Date | OS | Upgrade | backup | upgrade | rollback | restore |
+|---|---|---|---|---|---|---|
+| 2026-10-05 | AlmaLinux 10 | Management v0.79.0 → v0.80.0<br>Dashboard v2.93.0 → v2.94.0 | ✅ | ✅ | not tested yet | not tested yet |
+
+On AlmaLinux (and other RHEL-based systems) run `nbup` by its full path for now: `sudo /usr/local/sbin/nbup`. See [`sudo: nbup: command not found`](#sudo-nbup-command-not-found).
+
+Tested it on another setup? Open an issue or discussion with your OS, NetBird versions and results, and it will be added here.
+
+## Troubleshooting
+
+### `sudo: ./install.sh: command not found`
+
+`install.sh` isn't marked as executable, which can happen when the repository is copied without keeping file permissions. Either make it executable or run it through bash:
+
+```bash
+chmod +x install.sh && sudo ./install.sh
+# or
+sudo bash install.sh
+```
+
+### `sudo: nbup: command not found`
+
+For security, `sudo` doesn't use your own `PATH` but a fixed `secure_path` from `/etc/sudoers`. Debian and Ubuntu include `/usr/local/sbin` there, but RHEL, Rocky, Alma and CentOS usually don't. Check that `nbup` is installed and what sudo searches:
+
+```bash
+ls -l /usr/local/sbin/nbup        # should exist and be owned by root
+sudo sh -c 'echo $PATH'           # does it contain /usr/local/sbin?
+```
+
+If the file exists, call it by its full path:
+
+```bash
+sudo /usr/local/sbin/nbup status
+```
+
+If it doesn't exist, the installation stopped early. Run `sudo ./install.sh` again and check its output.
+
+### `BACKUP_ROOT=... is a temporary directory` or `... must be owned by root`
+
+`nbup` refuses backup locations where your backups could be lost or swapped by another user:
+
+- **Temporary locations** (`/tmp`, `/var/tmp`, `/dev/shm`, `/run`) are cleared on reboot or by automatic cleanup.
+- **Folders writable by other users**, such as a home directory, would let that user replace your backups.
+
+Use a permanent, root-owned location such as `BACKUP_ROOT="/var/backups/netbird"`. You don't need to create it; `nbup` creates it with the right owner and permissions on the first run.
+
+### `... is still a placeholder; replace it in /etc/nbup.conf`
+
+`/etc/nbup.conf` still contains a `<placeholder>`. Replace it with your own path, as described in [Set your paths](#set-your-paths), and keep the quotes.
+
+### Where are the logs?
+
+Every run is appended to `/var/log/nbup.log` (or the `LOG_FILE` set in `/etc/nbup.conf`):
+
+```bash
+sudo tail -n 100 /var/log/nbup.log
+```
 
 ## Uninstall
 

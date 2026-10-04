@@ -121,7 +121,9 @@ validate_config() {
   BACKUP_ROOT=$(realpath -m -- "$BACKUP_ROOT")
   # BACKUP_ROOT is forced to root:root 0700, so it must be a dedicated directory.
   case $BACKUP_ROOT in
-    /|/root|/home|/tmp|/var|/var/backups|/var/lib|/var/log|/var/tmp|/opt|/srv|/mnt|/media|/etc|/etc/*|/usr|/usr/*|/run|/run/*)
+    /tmp|/tmp/*|/var/tmp|/var/tmp/*|/dev/shm|/dev/shm/*|/run|/run/*)
+      die "BACKUP_ROOT=$BACKUP_ROOT is a temporary directory that is cleared on reboot or by automatic cleanup; use a persistent one such as /var/backups/netbird" ;;
+    /|/root|/home|/var|/var/backups|/var/lib|/var/log|/opt|/srv|/mnt|/media|/etc|/etc/*|/usr|/usr/*)
       die "BACKUP_ROOT=$BACKUP_ROOT is a shared directory; use a dedicated one such as /var/backups/netbird" ;;
     /home/*)
       [[ ${BACKUP_ROOT#/home/} == */* ]] \
