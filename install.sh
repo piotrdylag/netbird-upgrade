@@ -75,7 +75,7 @@ install -o root -g root -m 0755 "$tmp" "$BIN"
 echo "Installed $BIN"
 
 # Tab completion for bash (loaded automatically by the bash-completion package).
-sed 's/$//' "$SRC/completions/nbup.bash" >"$tmp"
+sed 's/\r$//' "$SRC/completions/nbup.bash" >"$tmp"
 install -D -o root -g root -m 0644 "$tmp" "$COMPLETION"
 echo "Installed $COMPLETION"
 
