@@ -24,6 +24,7 @@ A single Bash script to **back up, upgrade and restore a self-hosted [NetBird](h
 ## Requirements
 
 - Linux host running NetBird with **Docker Compose v2** (`docker compose`)
+- Debian/Ubuntu, or an Enterprise Linux 7+ system (RHEL, AlmaLinux, Rocky, CentOS, Oracle Linux)
 - `bash`, `tar`, `flock`, `sha256sum`, `realpath` (standard on Debian/Ubuntu/RHEL)
 - `curl` (optional, for release and version checks)
 
@@ -41,7 +42,7 @@ This installs `nbup` system-wide like any other command, so you can run it from 
 
 | Installed file | Purpose |
 |---|---|
-| `/usr/local/sbin/nbup` | The command (root-owned) |
+| `/usr/sbin/nbup` | The command (root-owned) |
 | `/etc/nbup.conf` | Your settings (kept on reinstall) |
 | `/usr/share/bash-completion/completions/nbup` | Tab completion for commands and options |
 | `/etc/sudoers.d/nbup` | Only with `--user`: the operator's sudo rule |
@@ -97,6 +98,30 @@ sudo nbup restore <archive>  # admins only (file name in BACKUP_ROOT)
 | `-y`, `--yes` | Don't ask for confirmation (needed when there is no terminal) |
 | `--no-certs` | Skip the proxy/Traefik certificate backup |
 | `--prune` | Remove dangling images after a successful upgrade |
+| `--netbird-dir=DIR` | Directory with NetBird's `docker-compose.yml` (overrides `NETBIRD_DIR`) |
+| `--backup-dir=DIR` | Directory for backup archives (overrides `BACKUP_ROOT`) |
+| `--keep-backups=N` | Number of archives to keep (overrides `KEEP_BACKUPS`) |
+| `--config-file=FILE` | Read settings from `FILE` instead of `/etc/nbup.conf` |
+
+Options can go before or after the command, and values can be written as `--backup-dir=DIR` or `--backup-dir DIR`.
+
+### Paths on the command line
+
+Instead of editing `/etc/nbup.conf`, an admin can pass the paths directly:
+
+```bash
+sudo nbup upgrade --netbird-dir=/opt/netbird --backup-dir=/var/backups/netbird
+cd /opt/netbird && sudo nbup backup --netbird-dir=. --backup-dir=/var/backups/netbird
+sudo nbup backup --config-file=/etc/nbup-site2.conf    # a second NetBird deployment
+```
+
+- **Order:** a command-line option overrides the config file, which overrides the built-in default.
+- **No config file needed:** `/etc/nbup.conf` is optional when both `--netbird-dir` and `--backup-dir` are given.
+- **Relative paths:** paths given as options may be relative to the current directory.
+- **Same checks as config paths:** placeholders, temporary or shared directories, and ownership.
+- **`--config-file` checks:** the file must be owned by root and not group/world-writable, and so must every directory above it, just like `/etc/nbup.conf`.
+- **Other settings stay in the config file:** log file, health check timings and the version-check token have no options.
+- **Operator account:** these options are for admins. The operator's sudo rule doesn't allow them (see [Security model](#security-model)).
 
 Read the release notes before upgrading: [netbird](https://github.com/netbirdio/netbird/releases), [dashboard](https://github.com/netbirdio/dashboard/releases).
 
@@ -111,7 +136,7 @@ Read the release notes before upgrading: [netbird](https://github.com/netbirdio/
 
 ## Configuration
 
-`/etc/nbup.conf` must be owned by root and not group/world-writable.
+`/etc/nbup.conf` (or the file given with `--config-file`) must be owned by root and not group/world-writable. `NETBIRD_DIR`, `BACKUP_ROOT` and `KEEP_BACKUPS` can also be set with [command-line options](#paths-on-the-command-line), which take precedence.
 
 | Setting | Default | Description |
 |---|---|---|
@@ -128,8 +153,9 @@ Read the release notes before upgrading: [netbird](https://github.com/netbirdio/
 ## Security model
 
 - **Never add the operator account to the `docker` group.** Docker group membership is equivalent to root.
-- The installed script (`/usr/local/sbin/nbup`) is owned by root and only root can modify it, so the sudo rule can't be used to run anything else.
-- Paths come only from the root-owned config file, never from arguments or environment variables. This stops anyone pointing the script at their own `docker-compose.yml`, which would give them root.
+- The installed script (`/usr/sbin/nbup`) is owned by root and only root can modify it, so the sudo rule can't be used to run anything else.
+- Paths come from the root-owned config file or from command-line options, never from environment variables. The operator's sudo rule lists exact argument lists (`nbup upgrade --yes` and so on), so that account can't pass `--netbird-dir`, `--backup-dir` or `--config-file`. Only full admins can, and they're root anyway.
+- **Never write a sudo rule that allows arbitrary arguments,** such as `nbup *`. Anyone with that rule could point nbup at their own `docker-compose.yml` with `--netbird-dir` and get root. Use the rule `install.sh --user` creates.
 - `restore` only accepts archives inside the root-only `BACKUP_ROOT`, and isn't part of the operator's sudo rule. `BACKUP_ROOT` and every parent directory must be root-owned, so no other user can swap in their own archives.
 - Keep `NETBIRD_DIR` and its `docker-compose.yml` writable by root only. Anyone who can edit the compose file can get root through this script; it prints a warning if the directory is writable by another user.
 - Backups contain your database and encryption keys (`config.yaml`). Store copies off the server and protect them.
@@ -140,7 +166,7 @@ Read the release notes before upgrading: [netbird](https://github.com/netbirdio/
 |---|---|---|---|---|---|---|
 | 2026-10-05 | AlmaLinux 10 | Management v0.79.0 → v0.80.0<br>Dashboard v2.93.0 → v2.94.0 | ✅ | ✅ | not tested yet | not tested yet |
 
-On AlmaLinux (and other RHEL-based systems) run `nbup` by its full path for now: `sudo /usr/local/sbin/nbup`. See [`sudo: nbup: command not found`](#sudo-nbup-command-not-found).
+nbup 1.0.x had to be run by its full path on AlmaLinux. Since nbup 1.1.0 it installs to `/usr/sbin`, so `sudo nbup` works there too. See [`sudo: nbup: command not found`](#sudo-nbup-command-not-found).
 
 Tested it on another setup? Open an issue or discussion with your OS, NetBird versions and results, and it will be added here.
 
@@ -158,17 +184,21 @@ sudo bash install.sh
 
 ### `sudo: nbup: command not found`
 
-For security, `sudo` doesn't use your own `PATH` but a fixed `secure_path` from `/etc/sudoers`. Debian and Ubuntu include `/usr/local/sbin` there, but RHEL, Rocky, Alma and CentOS usually don't. Check that `nbup` is installed and what sudo searches:
+For security, `sudo` doesn't use your own `PATH` but a fixed `secure_path` from `/etc/sudoers`. nbup 1.0.x installed to `/usr/local/sbin`, which Debian and Ubuntu include there but Enterprise Linux (RHEL, AlmaLinux, Rocky, CentOS) doesn't.
+
+Since nbup 1.1.0 the command is installed to `/usr/sbin/nbup`, which is in `secure_path` on all supported systems. If you installed an older version, move it with:
 
 ```bash
-ls -l /usr/local/sbin/nbup        # should exist and be owned by root
-sudo sh -c 'echo $PATH'           # does it contain /usr/local/sbin?
+cd netbird-upgrade
+sudo ./update.sh
 ```
 
-If the file exists, call it by its full path:
+This moves the command from `/usr/local/sbin` to `/usr/sbin`, and updates the operator's sudo rule to the new path. Your config is kept.
+
+If it still fails, check that the file exists:
 
 ```bash
-sudo /usr/local/sbin/nbup status
+ls -l /usr/sbin/nbup              # should exist and be owned by root
 ```
 
 If it doesn't exist, the installation stopped early. Run `sudo ./install.sh` again and check its output.
@@ -193,6 +223,26 @@ Every run is appended to `/var/log/nbup.log` (or the `LOG_FILE` set in `/etc/nbu
 ```bash
 sudo tail -n 100 /var/log/nbup.log
 ```
+
+## Updating nbup
+
+To update nbup itself to the latest version, run `update.sh` from your clone of this repository:
+
+```bash
+cd netbird-upgrade
+sudo ./update.sh
+```
+
+It pulls the latest version with git, lists the new changes, shows the installed and new versions (`nbup 1.0.0 -> 1.1.0`), and installs after you confirm. Your `/etc/nbup.conf` and sudo rule are kept. Installs from nbup 1.0.x are moved from `/usr/local/sbin` to `/usr/sbin`, including the path in the sudo rule.
+
+| Option | Description |
+|---|---|
+| `-y`, `--yes` | Don't ask for confirmation |
+| `--no-pull` | Skip `git pull` and install the files as they are, e.g. from a downloaded release archive |
+
+- `git pull` runs as the owner of the clone, not as root, so no root-owned files end up in your repository.
+- It refuses to run while `nbup` is busy, and when the clone has local changes.
+- This updates the **nbup tool**. To upgrade **NetBird** itself, use `sudo nbup upgrade`.
 
 ## Uninstall
 

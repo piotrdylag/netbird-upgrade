@@ -15,7 +15,11 @@
 
 set -euo pipefail
 
-BIN=/usr/local/sbin/nbup
+# /usr/sbin is in sudo's secure_path on EL 7+ and Debian/Ubuntu alike, and it's
+# where the .deb/.rpm packages install nbup too. nbup 1.0.x used /usr/local/sbin,
+# which EL's secure_path lacks ("sudo: nbup: command not found").
+BIN=/usr/sbin/nbup
+OLD_BIN=/usr/local/sbin/nbup
 COMPLETION=/usr/share/bash-completion/completions/nbup
 CONF=/etc/nbup.conf
 SUDOERS=/etc/sudoers.d/nbup
@@ -43,7 +47,7 @@ done
 [[ $EUID -eq 0 ]] || die "Run with sudo"
 
 if (( UNINSTALL )); then
-  rm -f -- "$BIN" "$COMPLETION" "$SUDOERS"
+  rm -f -- "$BIN" "$OLD_BIN" "$COMPLETION" "$SUDOERS"
   echo "Removed $BIN, $COMPLETION and $SUDOERS."
   echo "Kept $CONF, /var/log/nbup.log and your backups - delete them manually if wanted."
   exit 0
@@ -73,6 +77,10 @@ sed 's/\r$//' "$SRC/nbup.sh" >"$tmp"
 bash -n "$tmp" || die "nbup.sh has syntax errors"
 install -o root -g root -m 0755 "$tmp" "$BIN"
 echo "Installed $BIN"
+if [[ -e $OLD_BIN ]]; then
+  rm -f -- "$OLD_BIN"
+  echo "Removed the old copy $OLD_BIN"
+fi
 
 # Tab completion for bash (loaded automatically by the bash-completion package).
 sed 's/\r$//' "$SRC/completions/nbup.bash" >"$tmp"
@@ -115,7 +123,15 @@ EOF
   install -o root -g root -m 0440 "$tmp" "$SUDOERS"
   echo "Installed sudo rule $SUDOERS for $MAINT_USER"
 elif [[ -e $SUDOERS ]]; then
-  echo "Kept existing sudo rule $SUDOERS"
+  if grep -qF "$OLD_BIN" "$SUDOERS"; then
+    # Rule from nbup 1.0.x: point it at the new location, same commands.
+    sed "s#$OLD_BIN#$BIN#g" "$SUDOERS" >"$tmp"
+    visudo -cf "$tmp" >/dev/null || die "Updated sudoers rule is invalid; $SUDOERS left unchanged"
+    install -o root -g root -m 0440 "$tmp" "$SUDOERS"
+    echo "Updated sudo rule $SUDOERS to $BIN"
+  else
+    echo "Kept existing sudo rule $SUDOERS"
+  fi
 fi
 
 cat <<EOF

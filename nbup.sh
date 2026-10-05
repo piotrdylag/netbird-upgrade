@@ -19,20 +19,29 @@
 #   list               List available backups
 #
 # Options:
-#   -y, --yes          Do not ask for confirmation (required without a TTY)
-#   --no-certs         Skip proxy/traefik certificate backup
-#   --prune            Remove dangling images after a successful upgrade
-#   -h, --help         Show this help
-#   --version          Show the nbup version
+#   -y, --yes             Do not ask for confirmation (required without a TTY)
+#   --no-certs            Skip proxy/traefik certificate backup
+#   --prune               Remove dangling images after a successful upgrade
+#   --netbird-dir=DIR     Directory with NetBird's docker-compose.yml
+#   --backup-dir=DIR      Directory for backup archives
+#   --keep-backups=N      Number of backup archives to keep
+#   --config-file=FILE    Read settings from FILE instead of /etc/nbup.conf
+#   -h, --help            Show this help
+#   --version             Show the nbup version
 #
-# Settings are read from /etc/nbup.conf, which must be owned by root
-# and not group/world-writable. Paths cannot be overridden on the command line
-# or through the environment, so a sudo rule for this script cannot be abused
-# to point it at an attacker-controlled docker-compose.yml.
+# Settings come from /etc/nbup.conf (or --config-file), which must be owned by
+# root and not group/world-writable. --netbird-dir, --backup-dir and
+# --keep-backups override the config file; with both paths given, the config
+# file is optional. Nothing is read from environment variables.
+#
+# Security: the sudo rule created by install.sh lists exact argument lists, so
+# a restricted operator account cannot use these options. Never allow
+# arbitrary arguments (such as "nbup *") in a sudo rule: pointing nbup at
+# another docker-compose.yml gives root.
 
 set -Eeuo pipefail
 umask 077
-VERSION=1.0.0
+VERSION=1.1.0
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
@@ -49,7 +58,12 @@ NB_DOMAIN=                          # optional: for management version check
 NB_API_TOKEN=                       # optional: PAT / access token for the API
 
 # ---- Internal state --------------------------------------------------------
-CONF_FILE=/etc/nbup.conf
+DEFAULT_CONF=/etc/nbup.conf
+CONF_FILE=$DEFAULT_CONF
+CLI_CONF_FILE=
+CLI_NETBIRD_DIR=
+CLI_BACKUP_ROOT=
+CLI_KEEP_BACKUPS=
 LOCK_FILE=/run/nbup.lock
 IMAGES_META=.nbup-images
 ASSUME_YES=0
@@ -92,15 +106,47 @@ has_service() { grep -qxF -- "$1" <<<"$SERVICES"; }
 
 container_id() { compose ps -aq "$1" 2>/dev/null | head -n1; }
 
+# Where a setting can be changed, for error messages.
+setting_hint() {
+  local conf=${CONF_FILE:-$DEFAULT_CONF}
+  case $1 in
+    NETBIRD_DIR)  echo "--netbird-dir or $conf" ;;
+    BACKUP_ROOT)  echo "--backup-dir or $conf" ;;
+    KEEP_BACKUPS) echo "--keep-backups or $conf" ;;
+    *)            echo "$conf" ;;
+  esac
+}
+
+# Order: command-line options, then the config file, then the defaults above.
 load_config() {
-  [[ -e $CONF_FILE ]] || die "$CONF_FILE not found; run install.sh first"
-  local owner mode
-  owner=$(stat -L -c %u "$CONF_FILE")
-  mode=$(stat -L -c %a "$CONF_FILE")
-  [[ $owner == 0 ]] || die "$CONF_FILE must be owned by root"
-  (( (8#$mode & 8#022) == 0 )) || die "$CONF_FILE must not be group/world-writable"
-  # shellcheck source=/dev/null
-  . "$CONF_FILE"
+  if [[ -n $CLI_CONF_FILE ]]; then
+    CONF_FILE=$(realpath -e -- "$CLI_CONF_FILE" 2>/dev/null) \
+      || die "Config file $CLI_CONF_FILE not found"
+  elif [[ ! -e $CONF_FILE ]]; then
+    [[ -n $CLI_NETBIRD_DIR && -n $CLI_BACKUP_ROOT ]] \
+      || die "$CONF_FILE not found; run install.sh first, or pass both --netbird-dir and --backup-dir"
+    CONF_FILE=
+  fi
+
+  if [[ -n $CONF_FILE ]]; then
+    local owner mode bad
+    [[ -f $CONF_FILE ]] || die "$CONF_FILE is not a regular file"
+    owner=$(stat -L -c %u "$CONF_FILE")
+    mode=$(stat -L -c %a "$CONF_FILE")
+    [[ $owner == 0 ]] || die "$CONF_FILE must be owned by root"
+    (( (8#$mode & 8#022) == 0 )) || die "$CONF_FILE must not be group/world-writable"
+    # Whoever can write to a parent directory could swap the file.
+    bad=$(first_unsafe_dir "$(dirname "$(realpath -- "$CONF_FILE")")")
+    [[ -z $bad ]] || die "$bad must be owned by root and not group/world-writable (it holds $CONF_FILE)"
+    # shellcheck source=/dev/null
+    . "$CONF_FILE"
+  fi
+
+  # Relative paths on the command line are taken from the current directory,
+  # e.g. "cd /opt/netbird && sudo nbup upgrade --netbird-dir=.".
+  if [[ -n $CLI_NETBIRD_DIR ]];  then NETBIRD_DIR=$(realpath -m -- "$CLI_NETBIRD_DIR"); fi
+  if [[ -n $CLI_BACKUP_ROOT ]];  then BACKUP_ROOT=$(realpath -m -- "$CLI_BACKUP_ROOT"); fi
+  if [[ -n $CLI_KEEP_BACKUPS ]]; then KEEP_BACKUPS=$CLI_KEEP_BACKUPS; fi
 }
 
 # Rejects unset paths and <placeholders> left over from the example config,
@@ -110,12 +156,21 @@ validate_config() {
   for name in NETBIRD_DIR BACKUP_ROOT LOG_FILE NB_DOMAIN NB_API_TOKEN; do
     value=${!name}
     [[ $value != *[\<\>]* ]] \
-      || die "$name=\"$value\" is still a placeholder; replace it in $CONF_FILE"
+      || die "$name=\"$value\" is still a placeholder; set it with $(setting_hint "$name")"
   done
   for name in NETBIRD_DIR BACKUP_ROOT LOG_FILE; do
     value=${!name}
-    [[ -n $value ]] || die "$name is not set; set it in $CONF_FILE"
+    [[ -n $value ]] || die "$name is not set; set it with $(setting_hint "$name")"
     [[ $value == /* ]] || die "$name must be an absolute path (got \"$value\")"
+  done
+  # KEEP_BACKUPS=0 would delete the archive that was just created.
+  for name in KEEP_BACKUPS KEEP_ROLLBACK_IMAGES HEALTH_TIMEOUT; do
+    [[ ${!name} =~ ^[1-9][0-9]*$ ]] \
+      || die "$name must be a whole number of at least 1 (got \"${!name}\"); set it with $(setting_hint "$name")"
+  done
+  for name in HEALTH_STABLE MIN_FREE_MB; do
+    [[ ${!name} =~ ^[0-9]+$ ]] \
+      || die "$name must be a whole number (got \"${!name}\"); set it with $(setting_hint "$name")"
   done
   NETBIRD_DIR=$(realpath -m -- "$NETBIRD_DIR")
   BACKUP_ROOT=$(realpath -m -- "$BACKUP_ROOT")
@@ -166,7 +221,7 @@ preflight() {
   docker info >/dev/null 2>&1 || die "Docker daemon is not reachable"
   docker compose version >/dev/null 2>&1 \
     || die "Docker Compose v2 ('docker compose') is required"
-  [[ -d $NETBIRD_DIR ]] || die "NETBIRD_DIR=$NETBIRD_DIR does not exist (set it in $CONF_FILE)"
+  [[ -d $NETBIRD_DIR ]] || die "NETBIRD_DIR=$NETBIRD_DIR does not exist (set it with $(setting_hint NETBIRD_DIR))"
   cd "$NETBIRD_DIR"
   compose config -q || die "Invalid compose configuration in $NETBIRD_DIR"
   detect_layout
@@ -543,25 +598,46 @@ on_exit() {
 }
 
 main() {
-  local cmd=${1:-} arg=
-  if (( $# )); then shift; fi
+  local cmd= arg= opt val
   while (( $# )); do
-    case $1 in
-      -y|--yes)   ASSUME_YES=1 ;;
-      --no-certs) INCLUDE_CERTS=0 ;;
-      --prune)    PRUNE=1 ;;
-      -h|--help)  usage; exit 0 ;;
-      -*)         die "Unknown option: $1" ;;
-      *)          [[ -z $arg ]] || die "Unexpected argument: $1"; arg=$1 ;;
+    opt=$1 val=
+    # Options with a value accept both --opt=value and --opt value.
+    case $opt in
+      --netbird-dir=*|--backup-dir=*|--keep-backups=*|--config-file=*)
+        val=${opt#*=} opt=${opt%%=*} ;;
+      --netbird-dir|--backup-dir|--keep-backups|--config-file)
+        (( $# >= 2 )) || die "$opt needs a value"
+        val=$2; shift ;;
+    esac
+    case $opt in
+      --netbird-dir|--backup-dir|--keep-backups|--config-file)
+        [[ -n $val ]] || die "$opt needs a value" ;;
+    esac
+    case $opt in
+      -y|--yes)       ASSUME_YES=1 ;;
+      --no-certs)     INCLUDE_CERTS=0 ;;
+      --prune)        PRUNE=1 ;;
+      --netbird-dir)  CLI_NETBIRD_DIR=$val ;;
+      --backup-dir)   CLI_BACKUP_ROOT=$val ;;
+      --keep-backups) CLI_KEEP_BACKUPS=$val ;;
+      --config-file)  CLI_CONF_FILE=$val ;;
+      -h|--help)      usage; exit 0 ;;
+      --version)      echo "nbup $VERSION"; exit 0 ;;
+      -*)             die "Unknown option: $opt (see --help)" ;;
+      *)
+        if [[ -z $cmd ]]; then cmd=$opt
+        elif [[ -z $arg ]]; then arg=$opt
+        else die "Unexpected argument: $opt"
+        fi ;;
     esac
     shift
   done
   case $cmd in
-    ""|-h|--help|help) usage; exit 0 ;;
-    --version) echo "nbup $VERSION"; exit 0 ;;
+    ""|help) usage; exit 0 ;;
     backup|upgrade|restore|status|list) ;;
     *) die "Unknown command: $cmd (see --help)" ;;
   esac
+  [[ -z $arg || $cmd == restore ]] || die "Unexpected argument: $arg"
 
   [[ $EUID -eq 0 ]] || die "Must be run as root: sudo nbup $cmd"
   load_config
