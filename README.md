@@ -197,7 +197,7 @@ sudo ./install.sh --uninstall
 |---|---|---|---|---|---|---|---|
 | 2026-10-05 | 1.0.0 | AlmaLinux 10 | Management v0.79.0 → v0.80.0<br>Dashboard v2.93.0 → v2.94.0 | ✅ | ✅ | not tested yet | not tested yet |
 
-nbup 1.0.x had to be run by its full path on AlmaLinux (`sudo /usr/local/sbin/nbup`). nbup 1.1.0 installs to `/usr/sbin` so that `sudo nbup` works there too; that version hasn't been tested on a real server yet. See [`sudo: nbup: command not found`](#sudo-nbup-command-not-found).
+nbup 1.0.x had to be run by its full path on AlmaLinux (`sudo /usr/local/sbin/nbup`). nbup 1.1.0 installs to `/usr/sbin`, and `sudo nbup` works there too (confirmed on AlmaLinux 10 on 2026-10-05). See [`sudo: nbup: command not found`](#sudo-nbup-command-not-found).
 
 Tested it on another setup? Open an issue or discussion with your OS, NetBird versions and results, and it will be added here.
 
